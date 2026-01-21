@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>多圖瀏覽＋指定區域按鈕播放</title>
+  <style>
+    :root{
+      /* 預設按鈕位置（百分比，0~100），與大小（以 vmin 為單位） */
+      --hotspot-x: 95%;
+      --hotspot-y: 50%;
+      --hotspot-size: 8vmin;
+    }
+    html, body { height: 100%; margin: 0; background: #0b0b0c; color: #fff; }
+    .wrap { height: 100%; display: grid; place-items: center; padding: 2vmin; box-sizing: border-box; }
+
+    .stage { position: relative; max-width: 96vw; max-height: 96vh; aspect-ratio: 16/9; background: #111; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+    .art { width: 100%; height: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; display: block; background: #0f0f10; }
+
+    /* 圖上方的圓形播放按鈕（僅此區域能觸發音檔播放） */
+    .hotspot { position: absolute; left: var(--hotspot-x); top: var(--hotspot-y); transform: translate(-50%, -50%); width: var(--hotspot-size); height: var(--hotspot-size); border-radius: 999px; border: none; cursor: pointer; display: grid; place-items: center; backdrop-filter: blur(3px); background: transparent; box-shadow: 0 6px 20px rgba(0,0,0,.35); transition: transform .12s ease, box-shadow .2s ease; }
+    .hotspot:active { transform: translate(-50%, -50%) scale(.96); box-shadow: 0 4px 14px rgba(0,0,0,.4); }
+    .hotspotImg { width: 100%; height: 100%; object-fit: contain; pointer-events: none; user-select: none; -webkit-user-drag: none; }
+    .hotspot:active { transform: translate(-50%, -50%) scale(.96); box-shadow: 0 4px 14px rgba(0,0,0,.4); }
+    .hotspotIcon { font: 700 clamp(14px, 4.5vmin, 26px)/1 system-ui, -apple-system, Segoe UI, Roboto, Noto Sans TC, Helvetica, Arial; color: #000; }
+    .playing .hotspotIcon { content: ""; }
+
+    /* 導覽控制（上一張/下一張與計數） */
+    .nav { position: absolute; inset: auto 0 0 0; display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; padding: 10px; background: linear-gradient(to top, rgba(0,0,0,.55), rgba(0,0,0,0)); }
+    .navbtn { justify-self: start; background: rgba(255,255,255,.15); color: #fff; border: 1px solid rgba(255,255,255,.18); border-radius: 12px; padding: 8px 12px; font: 600 14px/1 system-ui, -apple-system, Segoe UI, Roboto, Noto Sans TC, Helvetica, Arial; cursor: pointer; }
+    .navbtn:last-child { justify-self: end; }
+    .navbtn:active { transform: translateY(1px); }
+    .count { justify-self: center; font: 600 14px/1 system-ui, -apple-system, Segoe UI, Roboto, Noto Sans TC, Helvetica, Arial; opacity: .9; }
+
+    /* 右下角提示/錯誤訊息 */
+    .hint { position: absolute; right: 12px; bottom: 56px; padding: 6px 10px; border-radius: 10px; background: rgba(0,0,0,.55); color: #fff; font: 500 13px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Noto Sans TC, Helvetica, Arial; }
+
+    /* 偵錯模式會標記熱區位置 */
+    .stage.debug .hotspot { outline: 2px dashed rgba(255,255,255,.6); }
+    .stage.debug::after { content: attr(data-debug); position: absolute; left: 10px; top: 10px; padding: 6px 8px; border-radius: 8px; background: rgba(0,0,0,.55); font: 600 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Noto Sans TC, Helvetica, Arial; color: #fff; }
+
+    .hotspots { position:absolute; inset:0; pointer-events:none; }
+    .hotspots .hotspot { pointer-events:auto; }
+
+    audio { position: fixed; width: 0; height: 0; opacity: 0; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="stage" class="stage" data-debug="">
+      <img id="art" class="art" alt="展示圖片" />
+      <button id="hotspot" class="hotspot" aria-label="播放/暫停音訊" title="播放/暫停">
+        <img id="hotspotImg" class="hotspotImg" alt="播放按鈕" src="icon.png" />
+      </button>
+      <div class="nav">
+        <button id="prev" class="navbtn" aria-label="上一張">← 上一張</button>
+        <div id="count" class="count">1 / 1</div>
+        <button id="next" class="navbtn" aria-label="下一張">下一張 →</button>
+      </div>
+      <div class="hint" id="hint">只有限定的圖案按鈕會播放音檔</div>
+      <audio id="player" preload="auto"></audio>
+    </div>
+  </div>
+
+  <script>
+    const stage = document.getElementById('stage');
+    const imgEl = document.getElementById('art');
+    const hotspotsEl = document.getElementById('hotspots');
+    const hint = document.getElementById('hint');
+    const prevBtn = document.getElementById('prev');
+    const nextBtn = document.getElementById('next');
+    const countEl = document.getElementById('count');
+    const audio = document.getElementById('player');
+
+    // 讀取網址參數：?img=a.jpg,b.png,c.webp&audio=music.mp3&x=80&y=82&size=12&debug=1
+    const params = new URLSearchParams(location.search);
+    const imagesParam = params.get('img');
+    const audioParam = params.get('audio') || 'audio.mp3';
+    const xParam = parseFloat(params.get('x')); // 百分比
+    const yParam = parseFloat(params.get('y'));
+    const sizeParam = parseFloat(params.get('size'));
+    const verParam = params.get('ver') || params.get('v');
+    const debugParam = params.get('debug');
+    const iconParam = params.get('icon');
+
+    // 多熱區設定：每張圖可配置 2–4 個播放鍵
+    const CONFIG = {
+      img002: [
+        { id: '002-A', x: 95, y: 50, size: 8, icon: iconParam || 'icon.png', src: 'audio.mp3', segment: null, label: '段落 A' },
+        { id: '002-B', x: 80, y: 70, size: 8, icon: iconParam || 'icon.png', src: 'audio.mp3', segment: { start: 30, end: 55 }, label: '段落 B' }
+      ],
+      img003: [
+        { id: '003-A', x: 85, y: 60, size: 8, icon: iconParam || 'icon.png', src: 'audio.mp3', segment: { start: 60, end: 85 }, label: '段落 A' }
+      ],
+      img004: [
+        { id: '004-A', x: 90, y: 50, size: 8, icon: iconParam || 'icon.png', src: 'audio.mp3', segment: null, label: '段落 A' }
+      ]
+    };
+    const hotonlyParam = params.get('hotonly');
+    const HOT_ONLY = (hotonlyParam ? hotonlyParam.split(',').map(s => s.trim().toLowerCase()).filter(Boolean) : ['img002']);
+
+    // 圖片清單
+    let IMAGES = imagesParam ? imagesParam.split(',').map(s => s.trim()).filter(Boolean) : ['img001.jpg','img002.jpg','img003.jpg','img004.jpg'];
+
+    // 設定音檔來源
+    audio.src = withVer(audioParam);
+    hotspotImg.src = withVer(iconParam || 'icon.png');
+
+    // 設定熱區（百分比座標與大小）
+    function clamp(n, min, max){ return isNaN(n) ? undefined : Math.min(max, Math.max(min, n)); }
+    function baseName(p){ const n = p.split('/').pop(); const i = n.lastIndexOf('.'); return i>0 ? n.slice(0,i) : n; }
+    function withVer(src){ if(!verParam) return src; return src + (src.includes('?') ? '&' : '?') + 'v=' + encodeURIComponent(verParam); }
+            const x = clamp(xParam, 0, 100);
+    const y = clamp(yParam, 0, 100);
+    const size = clamp(sizeParam, 4, 40); // 單位 vmin
+    if (x !== undefined) stage.style.setProperty('--hotspot-x', x + '%');
+    if (y !== undefined) stage.style.setProperty('--hotspot-y', y + '%');
+    if (size !== undefined) stage.style.setProperty('--hotspot-size', size + 'vmin');
+
+    if (debugParam) {
+      stage.classList.add('debug');
+      stage.dataset.debug = `debug x:${getComputedStyle(stage).getPropertyValue('--hotspot-x').trim()} y:${getComputedStyle(stage).getPropertyValue('--hotspot-y').trim()} size:${getComputedStyle(stage).getPropertyValue('--hotspot-size').trim()}`;
+    }
+
+    // 載入與切換圖片
+    let index = 0;
+    function show(i){
+      index = (i + IMAGES.length) % IMAGES.length;
+      imgEl.src = withVer(IMAGES[index]);
+      countEl.textContent = `${index+1} / ${IMAGES.length}`;
+      const base = baseName(IMAGES[index]).toLowerCase();
+      // 切換頁面時重新渲染多個熱區
+      renderHotspotsFor(base);
+      // 換頁一律停止播放
+      if (!audio.paused) audio.pause();
+      activeHotspotId = null;
+      updateUI();
+    } / ${IMAGES.length}`;
+
+      const base = baseName(IMAGES[index]).toLowerCase();
+      const shouldShow = HOT_ONLY.includes(base) || HOT_ONLY.includes(String(index+1));
+      hotspot.style.display = shouldShow ? '' : 'none';
+
+      if (!shouldShow && !audio.paused) { audio.pause(); }
+      updateUI();
+    }
+
+    // 簡單預載
+    IMAGES.forEach(src => { const im = new Image(); im.src = withVer(src); });
+    show(0);
+
+    prevBtn.addEventListener('click', () => show(index - 1));
+    nextBtn.addEventListener('click', () => show(index + 1));
+
+    // 鍵盤左右切圖、空白/Enter 聚焦在 hotspot 才能播放
+    document.addEventListener('keydown', e => {
+      if (e.key === 'ArrowLeft') { e.preventDefault(); show(index - 1); }
+      if (e.key === 'ArrowRight') { e.preventDefault(); show(index + 1); }
+    });
+
+    // 熱區按鈕：播放/暫停
+    function updateUI(){
+      const playing = !audio.paused && !audio.ended && audio.currentTime > 0;
+      stage.classList.toggle('playing', playing);
+      hint.textContent = playing ? '播放中（再次點擊可暫停）' : '點一個圖案按鈕播放音檔';
+      // 標記目前播放中的熱區
+      document.querySelectorAll('.hotspot').forEach(btn => btn.classList.toggle('is-playing', btn.dataset.id === activeHotspotId && playing));
+    }
+
+    /* 單一熱區已移除，改為動態渲染多個熱區 */
+        } else {
+          audio.pause();
+        }
+        updateUI();
+      } catch (err) {
+        alert('無法播放：' + err.message + '\n\n排查：\n1) audio 來源路徑/檔名是否正確\n2) 音訊格式是否受瀏覽器支援（建議 MP3）\n3) 若在 GitHub Pages，請勿使用 Git LFS 上傳 mp3');
+      }
+    });
+
+    ['play','pause','ended','loadeddata','error','timeupdate'].forEach(ev => audio.addEventListener(ev, () => {
+      if (ev === 'timeupdate' && currentSegment && currentSegment.end != null && audio.currentTime >= currentSegment.end) {
+        if (currentLoop) {
+          audio.currentTime = currentSegment.start || 0;
+          audio.play();
+        } else {
+          audio.pause();
+        }
+      }
+      updateUI();
+    }));
+
+    // 畫面載入完畢同步提示
+    window.addEventListener('load', updateUI);
+
+    let activeHotspotId = null;
+    let currentSegment = null; // {start, end}
+    let currentLoop = false;
+
+    function renderHotspotsFor(base){
+      hotspotsEl.innerHTML = '';
+      const list = CONFIG[base] || [];
+      list.forEach(cfg => {
+        const btn = document.createElement('button');
+        btn.className = 'hotspot';
+        btn.dataset.id = cfg.id || `${base}-${cfg.x}-${cfg.y}`;
+        btn.style.left = (cfg.x ?? 85) + '%';
+        btn.style.top = (cfg.y ?? 85) + '%';
+        const sz = (cfg.size ?? 8);
+        btn.style.width = sz + 'vmin';
+        btn.style.height = sz + 'vmin';
+        btn.title = cfg.label || '播放/暫停';
+
+        const img = document.createElement('img');
+        img.className = 'hotspotImg';
+        img.alt = '播放按鈕';
+        img.src = withVer(cfg.icon || iconParam || 'icon.png');
+        btn.appendChild(img);
+
+        btn.addEventListener('click', async () => {
+          const same = activeHotspotId === btn.dataset.id;
+          if (same && !audio.paused) {
+            audio.pause();
+            return;
+          }
+          // 切換音檔與段落
+          currentSegment = cfg.segment || null;
+          currentLoop = !!cfg.loop;
+          if (audio.src !== new URL(withVer(cfg.src || audioParam), location.href).href) {
+            audio.src = withVer(cfg.src || audioParam);
+            await audio.load?.();
+          }
+          if (currentSegment && currentSegment.start) {
+            const seek = () => { audio.currentTime = currentSegment.start; audio.removeEventListener('loadedmetadata', seek); };
+            audio.addEventListener('loadedmetadata', seek);
+          }
+          activeHotspotId = btn.dataset.id;
+          await audio.play();
+          updateUI();
+        });
+
+        hotspotsEl.appendChild(btn);
+      });
+    }
+
+    // 圖片載入錯誤提示
+    imgEl.addEventListener('error', () => {
+      hint.textContent = '找不到圖片：' + IMAGES[index];
+    });
+  </script>
+</body>
+</html>
